@@ -32,7 +32,6 @@ class AuditApp(App):
         yield Footer()
 
     def on_mount(self):
-        # Load the data and show it in the table
         self.all_logs = load_audit_logs(self.log_file_path)
         self.current_logs = self.all_logs
 
@@ -46,15 +45,29 @@ class AuditApp(App):
         table = self.query_one(DataTable)
         table.clear()
 
-        # Update the counter text
         count_label = self.query_one("#results_count")
         count_label.update(f"Logs: {len(logs_to_show)}")
 
         for index, log in enumerate(logs_to_show):
-            user = escape(log.get("user", {}).get("name", "unknown"))
-            code = str(log.get("responseCode", ""))
-            time = log.get("requestTimestamp", "")[11:19]
-            method = log.get("method", "")
+            # 1. Get User (Check Rancher 'name' OR RKE2 'username')
+            user_data = log.get("user", {})
+            user = user_data.get("name") or user_data.get("username") or "unknown"
+
+            # 2. Get Code (Check Rancher 'responseCode' OR RKE2 'responseStatus -> code')
+            code = log.get("responseCode")
+            if code is None:
+                # If it's not a Rancher log, look inside responseStatus for RKE2
+                status_data = log.get("responseStatus", {})
+                code = status_data.get("code", "")
+            code = str(code)
+
+            # 3. Get Time (Check Rancher timestamp OR RKE2 timestamp)
+            time_raw = log.get("requestTimestamp") or log.get("requestReceivedTimestamp") or ""
+            time = time_raw[11:19] # Extract HH:MM:SS
+
+            # 4. Get Method (Check Rancher 'method' OR RKE2 'verb')
+            method = log.get("method") or log.get("verb") or ""
+
             uri = log.get("requestURI", "")
 
             # Set the color based on the code
@@ -63,7 +76,14 @@ class AuditApp(App):
             else:
                 color = "[green]"
 
-            table.add_row(time, user, f"{color}{code}[/]", method, uri, key=str(index))
+            table.add_row(
+                escape(time),
+                escape(user),
+                f"{color}{code}[/]",
+                escape(method),
+                escape(uri),
+                key=str(index)
+            )
 
     def on_input_changed(self, event):
         search_text = event.value.lower()
@@ -74,11 +94,19 @@ class AuditApp(App):
 
         filtered_list = []
         for log in self.all_logs:
-            user = log.get("user", {}).get("name", "").lower()
-            code = str(log.get("responseCode", ""))
+            # Re-run the same "Smart" extraction for the search
+            user_data = log.get("user", {})
+            user = str(user_data.get("name") or user_data.get("username") or "").lower()
+
+            # Code
+            code = log.get("responseCode")
+            if code is None:
+                code = log.get("responseStatus", {}).get("code", "")
+            code = str(code)
+
             uri = log.get("requestURI", "").lower()
-            method = log.get("method", "").lower()
-            time = log.get("requestTimestamp", "").lower()
+            method = str(log.get("method") or log.get("verb") or "").lower()
+            time = str(log.get("requestTimestamp") or log.get("requestReceivedTimestamp") or "").lower()
 
             if search_text in user:
                 filtered_list.append(log)

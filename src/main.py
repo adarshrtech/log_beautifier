@@ -1,7 +1,8 @@
 import sys
 import os
+from textual.app import App
+from textual.widgets import Header, Footer, DataTable, Input, Static
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from app import AuditApp
 
 def main():
