@@ -1,5 +1,9 @@
+import csv
+import os
+import asyncio
+from datetime import datetime
 from textual.app import App
-from textual.widgets import Header, Footer, DataTable, Input, Static
+from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator
 from rich.markup import escape
 
 from src.loadaudit import load_audit_logs
@@ -7,116 +11,161 @@ from src.jsonpopup import JsonPopup
 
 class AuditApp(App):
     CSS = """
-    DataTable { height: 1fr; }
+    DataTable { height: 1fr; border-top: solid $panel; }
     Input { margin: 1; border: solid white; }
-    #results_count { margin-left: 2; color: $text-muted; }
+    #results_count { margin-left: 2; color: $text-muted; height: 1; }
+    
+    LoadingIndicator {
+        background: $background 50%;
+        color: $accent;
+    }
     """
 
+    # We keep the 'm' binding here - it will show up automatically in the Footer!
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("c", "clear", "Clear Search"),
+        ("s", "save_csv", "Save to CSV"),
+        ("m", "load_more", "Load More (+1k)"), 
         ("tab", "focus_next", "Switch Focus")
     ]
 
     def __init__(self, log_file_path):
         super().__init__()
         self.log_file_path = log_file_path
-        self.all_logs = []
-        self.current_logs = []
+        self.all_logs = []       
+        self.current_logs = []   
+        self.search_task = None  
+        self.display_count = 1000  
 
     def compose(self):
         yield Header()
         yield Input(placeholder="Search logs...", id="search_input")
         yield Static("Found 0 logs", id="results_count")
         yield DataTable(zebra_stripes=True, cursor_type="row")
-        yield Footer()
+        yield Footer() # This will now show the 'M' key shortcut clearly
 
     def on_mount(self):
         self.all_logs = load_audit_logs(self.log_file_path)
         self.current_logs = self.all_logs
 
         table = self.query_one(DataTable)
-        table.add_columns("TIME", "USER", "CODE", "METHOD", "URI")
+        table.add_column("TIME", key="time")
+        table.add_column("USER", key="user")
+        table.add_column("CODE", key="code")
+        table.add_column("METHOD", key="method")
+        table.add_column("URI", key="uri")
+        
         self.update_table(self.all_logs)
         self.query_one("#search_input").focus()
 
-    def update_table(self, logs_to_show):
+    def update_table(self, logs_to_show, reset_pagination=True):
+        if reset_pagination:
+            self.display_count = 1000
+
         self.current_logs = logs_to_show
         table = self.query_one(DataTable)
+        
+        table.loading = True
         table.clear()
 
         count_label = self.query_one("#results_count")
-        count_label.update(f"Logs: {len(logs_to_show)}")
+        
+        # Professional status label
+        if len(logs_to_show) > self.display_count:
+            count_label.update(f"Found {len(logs_to_show)} logs | [b]Showing {self.display_count}[/] (Press 'M' for more)")
+        else:
+            count_label.update(f"Found {len(logs_to_show)} logs")
 
-        for index, log in enumerate(logs_to_show):
-            # 1. Get User (Check Rancher 'name' OR RKE2 'username')
+        logs_to_render = logs_to_show[:self.display_count]
+
+        for index, log in enumerate(logs_to_render):
             user_data = log.get("user", {})
             user = user_data.get("name") or user_data.get("username") or "unknown"
-
-            # 2. Get Code (Check Rancher 'responseCode' OR RKE2 'responseStatus -> code')
-            code = log.get("responseCode")
-            if code is None:
-                # If it's not a Rancher log, look inside responseStatus for RKE2
-                status_data = log.get("responseStatus", {})
-                code = status_data.get("code", "")
-            code = str(code)
-
-            # 3. Get Time (Check Rancher timestamp OR RKE2 timestamp)
+            code = str(log.get("responseCode") or log.get("responseStatus", {}).get("code", ""))
             time_raw = log.get("requestTimestamp") or log.get("requestReceivedTimestamp") or ""
-            time = time_raw[11:19] # Extract HH:MM:SS
-
-            # 4. Get Method (Check Rancher 'method' OR RKE2 'verb')
+            time = time_raw[11:19]
             method = log.get("method") or log.get("verb") or ""
-
             uri = log.get("requestURI", "")
 
-            # Set the color based on the code
-            if code.startswith("4") or code.startswith("5"):
-                color = "[red]"
-            else:
-                color = "[green]"
+            color = "[red]" if code.startswith(("4", "5")) else "[green]"
 
             table.add_row(
-                escape(time),
-                escape(user),
-                f"{color}{code}[/]",
-                escape(method),
-                escape(uri),
-                key=str(index)
+                escape(time), escape(user), f"{color}{code}[/]", 
+                escape(method), escape(uri), key=str(index)
             )
+        
+        table.loading = False
 
-    def on_input_changed(self, event):
-        search_text = event.value.lower()
+    def action_load_more(self):
+        """Logic for the 'M' key shortcut"""
+        if len(self.current_logs) > self.display_count:
+            self.display_count += 1000
+            self.update_table(self.current_logs, reset_pagination=False)
+            # A tiny notification to confirm it worked
+            self.notify(f"Display expanded to {self.display_count} rows")
+        else:
+            self.notify("All results already displayed", severity="warning")
 
-        if search_text == "":
+    def on_data_table_header_selected(self, event):
+        table = self.query_one(DataTable)
+        table.sort(event.column_key)
+
+    async def action_save_csv(self):
+        spinner = LoadingIndicator()
+        await self.mount(spinner)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"output/audit_export_{timestamp}.csv"
+        
+        if not os.path.exists("output"):
+            os.makedirs("output")
+
+        try:
+            with open(output_file, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["TIME", "USER", "CODE", "METHOD", "URI"])
+                for log in self.current_logs:
+                    user_data = log.get("user", {})
+                    user = user_data.get("name") or user_data.get("username") or "unknown"
+                    code = str(log.get("responseCode") or log.get("responseStatus", {}).get("code", ""))
+                    time_raw = log.get("requestTimestamp") or log.get("requestReceivedTimestamp") or ""
+                    time = time_raw[11:19]
+                    method = log.get("method") or log.get("verb") or ""
+                    uri = log.get("requestURI", "")
+                    writer.writerow([time, user, code, method, uri])
+            self.notify(f"Saved to {output_file}", title="CSV Exported")
+        except Exception as e:
+            self.notify(f"Export Failed: {str(e)}", severity="error")
+        finally:
+            await spinner.remove()
+
+    async def on_input_changed(self, event):
+        if self.search_task:
+            self.search_task.cancel()
+        self.search_task = asyncio.create_task(self.run_delayed_search(event.value))
+
+    async def run_delayed_search(self, text):
+        try:
+            await asyncio.sleep(0.3)
+            self.perform_search(text)
+        except asyncio.CancelledError:
+            pass
+
+    def perform_search(self, search_text):
+        search_text = search_text.lower()
+        if not search_text:
             self.update_table(self.all_logs)
             return
 
         filtered_list = []
         for log in self.all_logs:
-            # Re-run the same "Smart" extraction for the search
             user_data = log.get("user", {})
             user = str(user_data.get("name") or user_data.get("username") or "").lower()
-
-            # Code
-            code = log.get("responseCode")
-            if code is None:
-                code = log.get("responseStatus", {}).get("code", "")
-            code = str(code)
-
+            code = str(log.get("responseCode") or log.get("responseStatus", {}).get("code", ""))
             uri = log.get("requestURI", "").lower()
             method = str(log.get("method") or log.get("verb") or "").lower()
-            time = str(log.get("requestTimestamp") or log.get("requestReceivedTimestamp") or "").lower()
 
-            if search_text in user:
-                filtered_list.append(log)
-            elif search_text in code:
-                filtered_list.append(log)
-            elif search_text in uri:
-                filtered_list.append(log)
-            elif search_text in method:
-                filtered_list.append(log)
-            elif search_text in time:
+            if any(search_text in field for field in [user, code, uri, method]):
                 filtered_list.append(log)
 
         self.update_table(filtered_list)
