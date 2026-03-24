@@ -103,7 +103,7 @@ To analyze a specific audit log file:
 ##  Current Status : 
 
 - Rancher Audit Logs:  Supported  
-- RKE2 Audit Logs: WorkInProgress 
+- RKE2 Audit Logs: Supported  
 
 ## Improvement(WIP) : 
 
