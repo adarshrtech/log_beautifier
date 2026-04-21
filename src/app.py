@@ -1,6 +1,8 @@
 import csv
 import os
 import asyncio
+from collections import Counter
+
 from datetime import datetime
 from textual.app import App
 from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator
@@ -41,12 +43,30 @@ class AuditApp(App):
     def compose(self):
         yield Header()
         yield Input(placeholder="Search logs...", id="search_input")
+
+        self.top_uri_widget = Static("", id="top-uris")
+        yield self.top_uri_widget
+        
         yield Static("Found 0 logs", id="results_count")
         yield DataTable(zebra_stripes=True, cursor_type="row")
         yield Footer() # This will now show the 'M' key shortcut clearly
 
     def on_mount(self):
         self.all_logs = load_audit_logs(self.log_file_path)
+
+        text = (
+            self.format_top_uris(self.all_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_failing_uris(self.all_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_slow_requests(self.all_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_users(self.all_logs)
+            + "\n\n----------------------\n\n"
+        )
+
+        self.top_uri_widget.update(text)
+
         self.current_logs = self.all_logs
 
         table = self.query_one(DataTable)
@@ -182,3 +202,132 @@ class AuditApp(App):
         search_bar = self.query_one("#search_input")
         search_bar.value = ""
         search_bar.focus()
+    def get_top_uris(self, logs, top_n=5):
+        uris = []
+        for entry in logs:
+            uri = entry.get("requestURI", "unknown")
+            uris.append(uri)
+
+        counter = Counter(uris)
+        return counter.most_common(top_n)
+
+
+    def format_top_uris(self, logs):
+        top_uris = self.get_top_uris(logs)
+
+        lines = ["[bold #FFA500]Top URIs:[/bold #FFA500]"]
+        for i, (uri, count) in enumerate(top_uris, 1):
+            lines.append(f"{i}. {uri} ({count})")
+
+        return "\n".join(lines)
+    def get_top_failing_uris(self, logs, top_n=5):
+        stats = {}
+
+        for entry in logs:
+            code = str(
+                entry.get("responseCode") or
+                entry.get("responseStatus", {}).get("code") or
+                ""
+            )
+
+            if code.startswith(("4", "5")):
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+
+                if uri not in stats:
+                    stats[uri] = {"total": 0, "5xx": 0, "4xx": 0}
+
+                stats[uri]["total"] += 1
+
+                if code.startswith("5"):
+                    stats[uri]["5xx"] += 1
+                else:
+                    stats[uri]["4xx"] += 1
+
+        sorted_uris = sorted(
+            stats.items(),
+            key=lambda x: x[1]["total"],
+            reverse=True
+        )
+
+        return sorted_uris[:top_n]
+    def format_top_failing_uris(self, logs):
+        top_uris = self.get_top_failing_uris(logs)
+
+        lines = ["[bold red]Top Failing URIs:[/bold red]"]
+
+        for i, (uri, data) in enumerate(top_uris, 1):
+            lines.append(
+                f"{i}. {uri} "
+                f"(total: {data['total']}, 5xx: {data['5xx']}, 4xx: {data['4xx']})"
+            )
+
+        return "\n".join(lines)
+    def get_top_slow_requests(self, logs, top_n=5):
+        slow = []
+
+        for entry in logs:
+            latency = self.get_latency(entry)
+
+            if latency != "-":
+                value = float(latency.replace("s", ""))
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+                slow.append((uri, value))
+
+        slow_sorted = sorted(slow, key=lambda x: x[1], reverse=True)
+        return slow_sorted[:top_n]
+    def format_top_slow_requests(self, logs):
+        top = self.get_top_slow_requests(logs)
+
+        lines = ["[bold yellow]Top Slow Requests:[/bold yellow]"]
+
+        for i, (uri, latency) in enumerate(top, 1):
+            lines.append(f"{i}. {uri} ({latency:.3f}s)")
+
+        return "\n".join(lines)
+    def get_latency(self, entry):
+        try:
+            if entry.get("verb") == "watch":
+                return "-"
+
+            if "responseTimestamp" in entry:
+                start = entry.get("requestReceivedTimestamp") or entry.get("requestTimestamp")
+                end = entry.get("responseTimestamp")
+
+            elif entry.get("stage") == "ResponseComplete":
+                start = entry.get("requestReceivedTimestamp")
+                end = entry.get("stageTimestamp")
+
+            else:
+                return "-"
+
+            if start and end:
+                t1 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                t2 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                return f"{(t2 - t1).total_seconds():.3f}s"
+
+        except Exception:
+            pass
+
+        return "-"
+    def get_top_users(self, logs, top_n=5):
+        users = []
+
+        for entry in logs:
+            user = (
+                entry.get("user", {}).get("name") or
+                entry.get("user", {}).get("username") or
+                "unknown"
+            )
+            users.append(user)
+
+        counter = Counter(users)
+        return counter.most_common(top_n)
+    def format_top_users(self, logs):
+        top_users = self.get_top_users(logs)
+
+        lines = ["[bold cyan]Top Users:[/bold cyan]"]
+
+        for i, (user, count) in enumerate(top_users, 1):
+            lines.append(f"{i}. {user} ({count})")
+
+        return "\n".join(lines)
