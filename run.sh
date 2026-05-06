@@ -1,20 +1,23 @@
 #!/bin/bash
-
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$BASE_DIR"
 
-# Setup venv if missing
+VENV_PYTHON="$BASE_DIR/venv/bin/python3"
+
 if [ ! -d "venv" ]; then
+    echo " Creating local virtual environment..."
     python3 -m venv venv
-    # Installing 2 dependencies with pip. check dependancies manually.
-    source venv/bin/activate && pip install textual rich
+fi
+if ! "$VENV_PYTHON" -c "import textual, rich" &>/dev/null; then
+    echo "🔧 Installing/Fixing dependencies inside venv..."
+    "$VENV_PYTHON" -m pip install --upgrade pip
+    "$VENV_PYTHON" -m pip install textual rich
 fi
 
-source venv/bin/activate
-export PYTHONPATH=$PYTHONPATH:.
+export PYTHONPATH="$BASE_DIR"
 
 if [ -f "src/main.py" ]; then
-    python3 src/main.py "$@"
+    "$VENV_PYTHON" src/main.py "$@"
 else
-    python3 main.py "$@"
+    "$VENV_PYTHON" main.py "$@"
 fi
