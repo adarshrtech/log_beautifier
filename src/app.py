@@ -4,7 +4,8 @@ import asyncio
 from datetime import datetime
 from collections import Counter
 from textual.app import App
-from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator
+from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator, Button
+from textual.screen import ModalScreen
 from rich.markup import escape
 from rich.table import Table
 from rich.panel import Panel
@@ -12,6 +13,22 @@ from rich.panel import Panel
 # Local imports
 from src.loadaudit import load_audit_logs
 from src.jsonpopup import JsonPopup
+
+class StatsScreen(ModalScreen):
+    BINDINGS = [
+        ("escape", "dismiss", "Close")
+    ]
+
+    def __init__(self, stats_text):
+        super().__init__()
+        self.stats_text = stats_text
+
+    def compose(self):
+        yield Static(self.stats_text, id="stats_view")
+        yield Button("Close", id="close_stats")
+
+    def on_button_pressed(self, event):
+        self.dismiss()
 
 class AuditApp(App):
     CSS = """
@@ -36,7 +53,10 @@ class AuditApp(App):
         ("m", "load_more", "Load More (+1k)"),
         ("g", "jump_to_end", "End (G)"),
         ("h", "jump_to_start", "Home (H)"),
-        ("tab", "focus_next", "Switch Focus")
+        ("tab", "focus_next", "Switch Focus"),
+        ("tab", "focus_next", "Switch Focus"),
+        ("t", "show_stats", "Show Stats"),
+        ("x", "show_deletions", "Recent Deletes")
     ]
 
     def __init__(self, log_file_path):
@@ -206,3 +226,296 @@ class AuditApp(App):
     def action_clear(self):
         self.query_one("#search_input").value = ""
         self.query_one("#search_input").focus()
+
+
+    def format_top_uris_25(self, logs):
+        uris = [log.get("requestURI", "unknown") for log in logs]
+        top_uris = Counter(uris).most_common(25)
+
+        lines = ["[bold #FFA500]Top 25 URIs:[/bold #FFA500]"]
+
+        for i, (uri, count) in enumerate(top_uris, 1):
+            lines.append(f"{i}. {uri} ({count})")
+
+        return "\n".join(lines)
+    
+    def get_latency(self, entry):
+        try:
+            if entry.get("verb") == "watch":
+                return "-"
+
+            if "responseTimestamp" in entry:
+                start = entry.get("requestReceivedTimestamp") or entry.get("requestTimestamp")
+                end = entry.get("responseTimestamp")
+
+            elif entry.get("stage") == "ResponseComplete":
+                start = entry.get("requestReceivedTimestamp")
+                end = entry.get("stageTimestamp")
+
+            else:
+                return "-"
+
+            if start and end:
+                t1 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                t2 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                return f"{(t2 - t1).total_seconds():.3f}s"
+
+        except Exception:
+            pass
+
+        return "-"
+    
+    def format_top_slow_requests_25(self, logs):
+        stats = {}
+
+        for entry in logs:
+            latency = self.get_latency(entry)
+
+            if latency != "-":
+                value = float(latency.replace("s", ""))
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+
+                if uri not in stats:
+                    stats[uri] = {"count": 0, "total": 0, "max": 0}
+
+                stats[uri]["count"] += 1
+                stats[uri]["total"] += value
+                stats[uri]["max"] = max(stats[uri]["max"], value)
+
+        results = []
+
+        for uri, data in stats.items():
+            avg = data["total"] / data["count"]
+            results.append((uri, avg, data["max"], data["count"]))
+
+        results = sorted(results, key=lambda x: x[1], reverse=True)[:25]
+
+        lines = ["[bold yellow]Top Slow APIs by Average Latency:[/bold yellow]"]
+
+        for i, (uri, avg, max_latency, count) in enumerate(results, 1):
+            lines.append(
+                f"{i}. {uri} "
+                f"(avg: {avg:.3f}s, max: {max_latency:.3f}s, count: {count})"
+            )
+
+        return "\n".join(lines)
+    
+    def format_top_failing_apis_25(self, logs):
+        stats = {}
+
+        for entry in logs:
+            code = str(
+                entry.get("responseCode")
+                or entry.get("responseStatus", {}).get("code")
+                or ""
+            )
+
+            if code.startswith(("4", "5")):
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+
+                if uri not in stats:
+                    stats[uri] = {
+                        "total": 0,
+                        "5xx": 0,
+                        "4xx": 0
+                    }
+
+                stats[uri]["total"] += 1
+
+                if code.startswith("5"):
+                    stats[uri]["5xx"] += 1
+                else:
+                    stats[uri]["4xx"] += 1
+
+        results = sorted(
+            stats.items(),
+            key=lambda x: x[1]["total"],
+            reverse=True
+        )[:25]
+
+        lines = ["[bold red]Top Failing APIs:[/bold red]"]
+
+        for i, (uri, data) in enumerate(results, 1):
+            lines.append(
+                f"{i}. {uri} "
+                f"(total: {data['total']}, "
+                f"5xx: {data['5xx']}, "
+                f"4xx: {data['4xx']})"
+            )
+
+        return "\n".join(lines)
+    
+    def format_top_users_25(self, logs):
+        users = [
+            log.get("user", {}).get("name")
+            or log.get("user", {}).get("username")
+            or "unknown"
+            for log in logs
+        ]
+
+        top_users = Counter(users).most_common(25)
+
+        lines = ["[bold cyan]Top Users:[/bold cyan]"]
+
+        for i, (user, count) in enumerate(top_users, 1):
+            lines.append(f"{i}. {user} ({count})")
+
+        return "\n".join(lines)
+    
+    def format_top_error_users_25(self, logs):
+        stats = {}
+
+        for entry in logs:
+            code = str(
+                entry.get("responseCode")
+                or entry.get("responseStatus", {}).get("code")
+                or ""
+            )
+
+            if code.startswith(("4", "5")):
+                user = (
+                    entry.get("user", {}).get("name")
+                    or entry.get("user", {}).get("username")
+                    or "unknown"
+                )
+
+                if user not in stats:
+                    stats[user] = {
+                        "total": 0,
+                        "5xx": 0,
+                        "4xx": 0
+                    }
+
+                stats[user]["total"] += 1
+
+                if code.startswith("5"):
+                    stats[user]["5xx"] += 1
+                else:
+                    stats[user]["4xx"] += 1
+
+        results = sorted(
+            stats.items(),
+            key=lambda x: x[1]["total"],
+            reverse=True
+        )[:25]
+
+        lines = ["[bold magenta]Top Error Users:[/bold magenta]"]
+
+        for i, (user, data) in enumerate(results, 1):
+            lines.append(
+                f"{i}. {user} "
+                f"(total: {data['total']}, "
+                f"5xx: {data['5xx']}, "
+                f"4xx: {data['4xx']})"
+            )
+
+        return "\n".join(lines)
+    
+    def format_recent_modification_actions(self, logs):
+        modification_methods = {"DELETE", "PATCH", "PUT", "POST"}
+
+        actions = []
+
+        for entry in reversed(logs):
+            method = str(entry.get("method") or entry.get("verb") or "").upper()
+
+            if method in modification_methods:
+                user = (
+                    entry.get("user", {}).get("name")
+                    or entry.get("user", {}).get("username")
+                    or "unknown"
+                )
+
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+
+                actions.append((user, method, uri))
+
+            if len(actions) >= 25:
+                break
+
+        lines = ["[bold violet]Recent Modification Actions:[/bold violet]"]
+
+        if not actions:
+            lines.append("[dim]No DELETE / PATCH / PUT / POST actions found.[/dim]")
+            return "\n".join(lines)
+
+        for i, (user, method, uri) in enumerate(actions, 1):
+            color = (
+                "purple" if method == "DELETE"
+                else "yellow" if method in ("PATCH", "PUT")
+                else "green"
+            )
+
+            lines.append(
+                f"{i}. {user} "
+                f"[bold {color}]{method}[/bold {color}] "
+                f"{uri}"
+            )
+
+        return "\n".join(lines)
+    
+    def format_recent_deletions(self, logs):
+        deletions = []
+
+        for entry in reversed(logs):
+            method = str(entry.get("method") or entry.get("verb") or "").upper()
+
+            if method == "DELETE":
+                user = (
+                    entry.get("user", {}).get("name")
+                    or entry.get("user", {}).get("username")
+                    or "unknown"
+                )
+
+                uri = entry.get("requestURI", "unknown").split("?")[0]
+
+                time_raw = (
+                    entry.get("requestTimestamp")
+                    or entry.get("requestReceivedTimestamp")
+                    or ""
+                )
+
+                time = time_raw[11:19] if time_raw else "unknown"
+
+                deletions.append((time, user, uri))
+
+            if len(deletions) >= 25:
+                break
+
+        lines = ["[bold purple]Recent Resource Deletions:[/bold purple]"]
+
+        if not deletions:
+            lines.append("[dim]No DELETE actions found.[/dim]")
+            return "\n".join(lines)
+
+        for i, (time, user, uri) in enumerate(deletions, 1):
+            lines.append(
+                f"{i}. [red]{time}[/red] "
+                f"{user} "
+                f"[bold red]DELETE[/bold red] "
+                f"{uri}"
+            )
+
+        return "\n".join(lines)
+
+    def action_show_stats(self):
+        text = (
+            self.format_top_uris_25(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_slow_requests_25(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_failing_apis_25(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_users_25(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_error_users_25(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_recent_modification_actions(self.current_logs)
+        )
+        self.push_screen(StatsScreen(text))
+
+    def action_show_deletions(self):
+        text = self.format_recent_deletions(self.current_logs)
+        self.push_screen(StatsScreen(text))
+
+
