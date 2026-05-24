@@ -5,11 +5,26 @@ from collections import Counter
 
 from datetime import datetime
 from textual.app import App
-from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator
+
+from textual.screen import ModalScreen
+from textual.widgets import Header, Footer, DataTable, Input, Static, LoadingIndicator, Button
 from rich.markup import escape
 
 from src.loadaudit import load_audit_logs
 from src.jsonpopup import JsonPopup
+
+
+class StatsScreen(ModalScreen):
+    def __init__(self, stats_text):
+        super().__init__()
+        self.stats_text = stats_text
+
+    def compose(self):
+        yield Static(self.stats_text, id="stats_view")
+        yield Button("Close", id="close_stats")
+
+    def on_button_pressed(self, event):
+        self.dismiss()
 
 class AuditApp(App):
     CSS = """
@@ -29,7 +44,8 @@ class AuditApp(App):
         ("c", "clear", "Clear Search"),
         ("s", "save_csv", "Save to CSV"),
         ("m", "load_more", "Load More (+1k)"), 
-        ("tab", "focus_next", "Switch Focus")
+        ("tab", "focus_next", "Switch Focus"),
+        ("t", "show_stats", "Show Stats")
     ]
 
     def __init__(self, log_file_path):
@@ -39,13 +55,11 @@ class AuditApp(App):
         self.current_logs = []   
         self.search_task = None  
         self.display_count = 1000  
+        self.show_stats = False
 
     def compose(self):
         yield Header()
         yield Input(placeholder="Search logs...", id="search_input")
-
-        self.top_uri_widget = Static("", id="top-uris")
-        yield self.top_uri_widget
         
         yield Static("Found 0 logs", id="results_count")
         yield DataTable(zebra_stripes=True, cursor_type="row")
@@ -53,19 +67,6 @@ class AuditApp(App):
 
     def on_mount(self):
         self.all_logs = load_audit_logs(self.log_file_path)
-
-        text = (
-            self.format_top_uris(self.all_logs)
-            + "\n\n----------------------\n\n"
-            + self.format_top_failing_uris(self.all_logs)
-            + "\n\n----------------------\n\n"
-            + self.format_top_slow_requests(self.all_logs)
-            + "\n\n----------------------\n\n"
-            + self.format_top_users(self.all_logs)
-            + "\n\n----------------------\n\n"
-        )
-
-        self.top_uri_widget.update(text)
 
         self.current_logs = self.all_logs
 
@@ -202,7 +203,7 @@ class AuditApp(App):
         search_bar = self.query_one("#search_input")
         search_bar.value = ""
         search_bar.focus()
-    def get_top_uris(self, logs, top_n=5):
+    def get_top_uris(self, logs, top_n=25):
         uris = []
         for entry in logs:
             uri = entry.get("requestURI", "unknown")
@@ -220,7 +221,7 @@ class AuditApp(App):
             lines.append(f"{i}. {uri} ({count})")
 
         return "\n".join(lines)
-    def get_top_failing_uris(self, logs, top_n=5):
+    def get_top_failing_uris(self, logs, top_n=25):
         stats = {}
 
         for entry in logs:
@@ -262,7 +263,7 @@ class AuditApp(App):
             )
 
         return "\n".join(lines)
-    def get_top_slow_requests(self, logs, top_n=5):
+    def get_top_slow_requests(self, logs, top_n=25):
         slow = []
 
         for entry in logs:
@@ -309,7 +310,7 @@ class AuditApp(App):
             pass
 
         return "-"
-    def get_top_users(self, logs, top_n=5):
+    def get_top_users(self, logs, top_n=25):
         users = []
 
         for entry in logs:
@@ -331,3 +332,15 @@ class AuditApp(App):
             lines.append(f"{i}. {user} ({count})")
 
         return "\n".join(lines)
+    def action_show_stats(self):
+        text = (
+            self.format_top_uris(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_failing_uris(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_slow_requests(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_top_users(self.current_logs)
+        )
+
+        self.push_screen(StatsScreen(text))
