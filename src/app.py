@@ -56,7 +56,7 @@ class AuditApp(App):
         ("tab", "focus_next", "Switch Focus"),
         ("tab", "focus_next", "Switch Focus"),
         ("t", "show_stats", "Show Stats"),
-        ("x", "show_deletions", "Recent Deletes")
+        ("x", "show_recent_actions", "Recent Actions")
     ]
 
     def __init__(self, log_file_path):
@@ -428,7 +428,15 @@ class AuditApp(App):
 
                 uri = entry.get("requestURI", "unknown").split("?")[0]
 
-                actions.append((user, method, uri))
+                time_raw = (
+                    entry.get("requestTimestamp")
+                    or entry.get("requestReceivedTimestamp")
+                    or ""
+                )
+
+                time = time_raw[11:19] if time_raw else "unknown"
+
+                actions.append((time, user, method, uri))
 
             if len(actions) >= 25:
                 break
@@ -439,7 +447,7 @@ class AuditApp(App):
             lines.append("[dim]No DELETE / PATCH / PUT / POST actions found.[/dim]")
             return "\n".join(lines)
 
-        for i, (user, method, uri) in enumerate(actions, 1):
+        for i, (time, user, method, uri) in enumerate(actions, 1):
             color = (
                 "purple" if method == "DELETE"
                 else "yellow" if method in ("PATCH", "PUT")
@@ -447,7 +455,8 @@ class AuditApp(App):
             )
 
             lines.append(
-                f"{i}. {user} "
+                f"{i}. [cyan]{time}[/cyan] "
+                f"{user} "
                 f"[bold {color}]{method}[/bold {color}] "
                 f"{uri}"
             )
@@ -509,13 +518,15 @@ class AuditApp(App):
             + self.format_top_users_25(self.current_logs)
             + "\n\n----------------------\n\n"
             + self.format_top_error_users_25(self.current_logs)
-            + "\n\n----------------------\n\n"
-            + self.format_recent_modification_actions(self.current_logs)
         )
         self.push_screen(StatsScreen(text))
 
-    def action_show_deletions(self):
-        text = self.format_recent_deletions(self.current_logs)
+    def action_show_recent_actions(self):
+        text = (
+            self.format_recent_modification_actions(self.current_logs)
+            + "\n\n----------------------\n\n"
+            + self.format_recent_deletions(self.current_logs)
+        )
         self.push_screen(StatsScreen(text))
 
 
